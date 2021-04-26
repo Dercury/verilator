@@ -98,12 +98,14 @@ class ConstBitOpTreeVisitor final : public AstNVisitor {
         V3Number m_bitPolarity;  // Coefficient of each bit
         static int widthOfRef(AstVarRef* refp) {
             if (AstWordSel* selp = VN_CAST(refp->backp(), WordSel)) return selp->width();
+            if (AstCCast* castp = VN_CAST(refp->backp(), CCast)) return castp->width();
             return refp->width();
         }
 
     public:
         // METHODS
         bool hasConstantResult() const { return m_constResult >= 0; }
+        bool sameVarAs(const AstNodeVarRef* otherp) const { return m_refp->sameGateTree(otherp); }
         void setPolarity(bool compBit, int bit) {
             UASSERT_OBJ(!hasConstantResult(), m_refp, "Already has result of " << m_constResult);
             if (m_bitPolarity.bitIsX(bit)) {  // The bit is not yet set
@@ -222,6 +224,9 @@ class ConstBitOpTreeVisitor final : public AstNVisitor {
         if (!varInfop) {
             varInfop = new VarInfo{this, ref.m_refp};
             m_varInfos[idx] = varInfop;
+        } else {
+            if (!varInfop->sameVarAs(ref.m_refp))
+                CONST_BITOP_SET_FAILED("different var (scope?)", ref.m_refp);
         }
         return *varInfop;
     }
@@ -687,6 +692,8 @@ private:
         return true;
     }
     bool matchBitOpTree(AstNode* nodep) {
+        if (!v3Global.opt.oConstBitOpTree()) return false;
+
         AstNode* newp = nullptr;
         bool tried = false;
         if (AstAnd* andp = VN_CAST(nodep, And)) {  // 1 & BitOpTree
@@ -703,14 +710,14 @@ private:
         }
         if (newp) {
             UINFO(4, "Transformed leaf of bit tree to " << newp << std::endl);
-            if (debug() >= 9) {
+            if (debug() >= 9) {  // LCOV_EXCL_START
                 static int c = 0;
                 std::cout << "Call matchBitOpTree[" << c << "]\n";
                 nodep->dumpTree(std::cout);
                 std::cout << "\nResult:\n";
                 newp->dumpTree(std::cout);
                 ++c;
-            }
+            }  // LCOV_EXCL_STOP
             nodep->replaceWith(newp);
             VL_DO_DANGLING(nodep->deleteTree(), nodep);
         }
@@ -1525,7 +1532,7 @@ private:
         // Return false if referenced, or tree too deep to be worth it, or side effects
         if (!nodep) return true;
         if (level > 2) return false;
-        if (nodep->isPure()) return false;  // For example a $fgetc can't be reordered
+        if (!nodep->isPure()) return false;  // For example a $fgetc can't be reordered
         if (VN_IS(nodep, NodeVarRef) && VN_CAST(nodep, NodeVarRef)->varp() == varp) return false;
         return (varNotReferenced(nodep->nextp(), varp, level + 1)
                 && varNotReferenced(nodep->op1p(), varp, level + 1)
@@ -2108,7 +2115,7 @@ private:
                         VL_DO_DANGLING(replaceNum(nodep, num), nodep);
                         did = true;
                     }
-                } else if (m_params && VN_IS(valuep, InitArray) && VN_IS(nodep->backp(), Pin)) {
+                } else if (m_params && VN_IS(valuep, InitArray)) {
                     // Allow parameters to pass arrays
                     // Earlier recursion of InitArray made sure each array value is constant
                     // This exception is fairly fragile, i.e. doesn't
@@ -2150,7 +2157,7 @@ private:
             }
         }
         if (!did && m_required) {
-            nodep->v3error("Expecting expression to be constant, but variable isn't const: "
+            nodep->v3error("Expecting expression to be constant, but enum value isn't const: "
                            << nodep->itemp()->prettyNameQ());
         }
     }

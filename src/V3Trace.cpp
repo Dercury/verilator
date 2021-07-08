@@ -42,7 +42,7 @@
 #include "V3Trace.h"
 #include "V3EmitCBase.h"
 #include "V3Graph.h"
-#include "V3Hashed.h"
+#include "V3DupFinder.h"
 #include "V3Stats.h"
 
 #include <map>
@@ -154,8 +154,8 @@ public:
 class TraceVisitor final : public EmitCBaseVisitor {
 private:
     // NODE STATE
-    // V3Hashed
-    //  Ast*::user4()                   // V3Hashed calculation
+    // V3Hasher in V3DupFinder
+    //  Ast*::user4()                   // V3Hasher calculation
     // Cleared entire netlist
     //  AstCFunc::user1()               // V3GraphVertex* for this node
     //  AstTraceDecl::user1()           // V3GraphVertex* for this node
@@ -165,7 +165,7 @@ private:
     AstUser1InUse m_inuser1;
     AstUser2InUse m_inuser2;
     AstUser3InUse m_inuser3;
-    // AstUser4InUse     In V3Hashed
+    // AstUser4InUse     In V3Hasher via V3DupFinder
 
     // STATE
     AstNodeModule* m_topModp = nullptr;  // Module to add variables to
@@ -194,7 +194,7 @@ private:
     void detectDuplicates() {
         UINFO(9, "Finding duplicates\n");
         // Note uses user4
-        V3Hashed hashed;  // Duplicate code detection
+        V3DupFinder dupFinder;  // Duplicate code detection
         // Hash all of the values the traceIncs need
         for (const V3GraphVertex* itp = m_graph.verticesBeginp(); itp;
              itp = itp->verticesNextp()) {
@@ -205,13 +205,9 @@ private:
                     UASSERT_OBJ(nodep->valuep()->backp() == nodep, nodep,
                                 "Trace duplicate back needs consistency,"
                                 " so we can map duplicates back to TRACEINCs");
-                    hashed.hash(nodep->valuep());
-                    UINFO(8, "  Hashed " << std::hex << hashed.nodeHash(nodep->valuep()) << " "
-                                         << nodep << endl);
-
                     // Just keep one node in the map and point all duplicates to this node
-                    if (hashed.findDuplicate(nodep->valuep()) == hashed.end()) {
-                        hashed.hashAndInsert(nodep->valuep());
+                    if (dupFinder.findDuplicate(nodep->valuep()) == dupFinder.end()) {
+                        dupFinder.insert(nodep->valuep());
                     }
                 }
             }
@@ -221,10 +217,10 @@ private:
             if (TraceTraceVertex* const vvertexp = dynamic_cast<TraceTraceVertex*>(itp)) {
                 AstTraceDecl* const nodep = vvertexp->nodep();
                 if (nodep->valuep() && !vvertexp->duplicatep()) {
-                    const auto dupit = hashed.findDuplicate(nodep->valuep());
-                    if (dupit != hashed.end()) {
+                    const auto dupit = dupFinder.findDuplicate(nodep->valuep());
+                    if (dupit != dupFinder.end()) {
                         const AstTraceDecl* const dupDeclp
-                            = VN_CAST_CONST(hashed.iteratorNodep(dupit)->backp(), TraceDecl);
+                            = VN_CAST_CONST(dupit->second->backp(), TraceDecl);
                         UASSERT_OBJ(dupDeclp, nodep, "Trace duplicate of wrong type");
                         TraceTraceVertex* const dupvertexp
                             = dynamic_cast<TraceTraceVertex*>(dupDeclp->user1u().toGraphVertex());
@@ -237,7 +233,6 @@ private:
                 }
             }
         }
-        hashed.clear();
     }
 
     void graphSimplify(bool initial) {
@@ -490,33 +485,43 @@ private:
         name += cvtToStr(funcNump++);
         FileLine* const flp = m_topScopep->fileline();
         AstCFunc* const funcp = new AstCFunc(flp, name, m_topScopep);
-        const string argTypes("void* userp, " + v3Global.opt.traceClassBase() + "* tracep");
-        funcp->argTypes(argTypes);
         funcp->funcType(type);
+        funcp->dontCombine(true);
+        const bool isTopFunc
+            = type == AstCFuncType::TRACE_FULL || type == AstCFuncType::TRACE_CHANGE;
+        if (isTopFunc) {
+            funcp->argTypes("void* voidSelf, " + v3Global.opt.traceClassBase() + "* tracep");
+            funcp->isStatic(true);
+            funcp->addInitsp(new AstCStmt(
+                flp, prefixNameProtect(m_topModp) + "* const __restrict vlSelf = static_cast<"
+                         + prefixNameProtect(m_topModp) + "*>(voidSelf);\n"));
+            funcp->addInitsp(new AstCStmt(flp, symClassAssign()));
+
+        } else {
+            funcp->argTypes(v3Global.opt.traceClassBase() + "* tracep");
+            funcp->isStatic(false);
+        }
+        funcp->isLoose(true);
         funcp->slow(type == AstCFuncType::TRACE_FULL || type == AstCFuncType::TRACE_FULL_SUB);
-        funcp->symProlog(true);
-        funcp->declPrivate(true);
         // Add it to top scope
         m_topScopep->addActivep(funcp);
         // Add call to new function
         if (callfromp) {
             AstCCall* callp = new AstCCall(funcp->fileline(), funcp);
-            callp->argTypes("userp, tracep");
+            callp->argTypes("tracep");
             callfromp->addStmtsp(callp);
         }
         // Register function
         if (regp) {
-            string registration = "tracep->add";
             if (type == AstCFuncType::TRACE_FULL) {
-                registration += "Full";
+                regp->addStmtsp(new AstText(flp, "tracep->addFullCb(", true));
             } else if (type == AstCFuncType::TRACE_CHANGE) {
-                registration += "Chg";
+                regp->addStmtsp(new AstText(flp, "tracep->addChgCb(", true));
             } else {
                 funcp->v3fatalSrc("Don't know how to register this type of function");
             }
-            registration += "Cb(&" + protect(name) + ", __VlSymsp);\n";
-            AstCStmt* const stmtp = new AstCStmt(flp, registration);
-            regp->addStmtsp(stmtp);
+            regp->addStmtsp(new AstAddrOfCFunc(flp, funcp));
+            regp->addStmtsp(new AstText(flp, ", vlSelf);\n", true));
         }
         // Add global activity check to TRACE_CHANGE functions
         if (type == AstCFuncType::TRACE_CHANGE) {
@@ -635,7 +640,7 @@ private:
                 // If required, create the conditional node checking the activity flags
                 if (!prevActSet || actSet != *prevActSet) {
                     FileLine* const flp = m_topScopep->fileline();
-                    bool always = actSet.count(TraceActivityVertex::ACTIVITY_ALWAYS) != 0;
+                    const bool always = actSet.count(TraceActivityVertex::ACTIVITY_ALWAYS) != 0;
                     AstNode* condp = nullptr;
                     if (always) {
                         condp = new AstConst(flp, 1);  // Always true, will be folded later
@@ -671,17 +676,22 @@ private:
     void createCleanupFunction(AstCFunc* regFuncp) {
         FileLine* const fl = m_topScopep->fileline();
         AstCFunc* const cleanupFuncp = new AstCFunc(fl, "traceCleanup", m_topScopep);
-        const string argTypes("void* userp, " + v3Global.opt.traceClassBase() + "* /*unused*/");
-        cleanupFuncp->argTypes(argTypes);
+        cleanupFuncp->argTypes("void* voidSelf, " + v3Global.opt.traceClassBase()
+                               + "* /*unused*/");
         cleanupFuncp->funcType(AstCFuncType::TRACE_CLEANUP);
         cleanupFuncp->slow(false);
-        cleanupFuncp->symProlog(true);
-        cleanupFuncp->declPrivate(true);
+        cleanupFuncp->isStatic(true);
+        cleanupFuncp->isLoose(true);
         m_topScopep->addActivep(cleanupFuncp);
+        cleanupFuncp->addInitsp(new AstCStmt(
+            fl, prefixNameProtect(m_topModp) + "* const __restrict vlSelf = static_cast<"
+                    + prefixNameProtect(m_topModp) + "*>(voidSelf);\n"));
+        cleanupFuncp->addInitsp(new AstCStmt(fl, symClassAssign()));
 
         // Register it
-        regFuncp->addStmtsp(new AstCStmt(
-            fl, string("tracep->addCleanupCb(&" + protect("traceCleanup") + ", __VlSymsp);\n")));
+        regFuncp->addStmtsp(new AstText(fl, "tracep->addCleanupCb(", true));
+        regFuncp->addStmtsp(new AstAddrOfCFunc(fl, cleanupFuncp));
+        regFuncp->addStmtsp(new AstText(fl, ", vlSelf);\n", true));
 
         // Clear global activity flag
         cleanupFuncp->addStmtsp(
@@ -731,7 +741,7 @@ private:
         regFuncp->funcType(AstCFuncType::TRACE_REGISTER);
         regFuncp->slow(true);
         regFuncp->isStatic(false);
-        regFuncp->declPrivate(true);
+        regFuncp->isLoose(true);
         m_topScopep->addActivep(regFuncp);
 
         const int parallelism = 1;  // Note: will bump this later, code below works for any value
@@ -824,7 +834,8 @@ private:
         V3GraphVertex* const funcVtxp = getCFuncVertexp(nodep);
         if (!m_finding) {  // If public, we need a unique activity code to allow for sets
                            // directly in this func
-            if (nodep->funcPublic() || nodep->dpiExport() || nodep == v3Global.rootp()->evalp()) {
+            if (nodep->funcPublic() || nodep->dpiExportImpl()
+                || nodep == v3Global.rootp()->evalp()) {
                 V3GraphVertex* const activityVtxp = getActivityVertexp(nodep, nodep->slow());
                 new V3GraphEdge(&m_graph, activityVtxp, funcVtxp, 1);
             }

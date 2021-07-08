@@ -309,16 +309,16 @@ private:
         }
     }
     virtual void visit(AstNodeIf* nodep) {
-        LatchDetectGraphVertex* parentp = m_graph.currentp();
-        LatchDetectGraphVertex* branchp = m_graph.addPathVertex(parentp, "BRANCH", true);
-        m_graph.addPathVertex(branchp, "IF");
-        iterateAndNextNull(nodep->ifsp());
-        m_graph.addPathVertex(branchp, "ELSE");
-        iterateAndNextNull(nodep->elsesp());
-        m_graph.currentp(parentp);
+        if (!nodep->isBoundsCheck()) {
+            LatchDetectGraphVertex* parentp = m_graph.currentp();
+            LatchDetectGraphVertex* branchp = m_graph.addPathVertex(parentp, "BRANCH", true);
+            m_graph.addPathVertex(branchp, "IF");
+            iterateAndNextNull(nodep->ifsp());
+            m_graph.addPathVertex(branchp, "ELSE");
+            iterateAndNextNull(nodep->elsesp());
+            m_graph.currentp(parentp);
+        }
     }
-    // Empty visitors, speed things up
-    virtual void visit(AstNodeMath* nodep) {}
     //--------------------
     virtual void visit(AstNode* nodep) { iterateChildren(nodep); }
 
@@ -474,11 +474,10 @@ private:
         if (!m_scopeFinalp) {
             m_scopeFinalp = new AstCFunc(
                 nodep->fileline(), "_final_" + m_namer.scopep()->nameDotless(), m_namer.scopep());
-            m_scopeFinalp->argTypes(EmitCBaseVisitor::symClassVar());
-            m_scopeFinalp->addInitsp(
-                new AstCStmt(nodep->fileline(), EmitCBaseVisitor::symTopAssign() + "\n"));
             m_scopeFinalp->dontCombine(true);
             m_scopeFinalp->formCallTree(true);
+            m_scopeFinalp->isStatic(false);
+            m_scopeFinalp->isLoose(true);
             m_scopeFinalp->slow(true);
             m_namer.scopep()->addActivep(m_scopeFinalp);
         }

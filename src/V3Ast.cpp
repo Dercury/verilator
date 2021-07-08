@@ -119,7 +119,7 @@ string AstNode::encodeName(const string& namein) {
             // a user identifier nor a temp we create in Verilator.
             // We also do *NOT* use __DOT__ etc, as we search for those
             // in some replacements, and don't want to mangle the user's names.
-            unsigned val = pos[0] & 0xff;  // Mask to avoid sign extension
+            const unsigned val = pos[0] & 0xff;  // Mask to avoid sign extension
             std::stringstream hex;
             hex << std::setfill('0') << std::setw(2) << std::hex << val;
             out += "__0" + hex.str();
@@ -932,7 +932,9 @@ AstNode* AstNode::iterateSubtreeReturnEdits(AstNVisitor& v) {
 void AstNode::cloneRelinkTree() {
     // private: Cleanup clone() operation on whole tree. Publicly call cloneTree() instead.
     for (AstNode* nodep = this; nodep; nodep = nodep->m_nextp) {
-        if (m_dtypep && m_dtypep->clonep()) m_dtypep = m_dtypep->clonep();
+        if (nodep->m_dtypep && nodep->m_dtypep->clonep()) {
+            nodep->m_dtypep = nodep->m_dtypep->clonep();
+        }
         nodep->cloneRelink();
         if (nodep->m_op1p) nodep->m_op1p->cloneRelinkTree();
         if (nodep->m_op2p) nodep->m_op2p->cloneRelinkTree();
@@ -968,20 +970,6 @@ bool AstNode::sameTreeIter(const AstNode* node1p, const AstNode* node2p, bool ig
             && sameTreeIter(node1p->m_op3p, node2p->m_op3p, false, gateOnly)
             && sameTreeIter(node1p->m_op4p, node2p->m_op4p, false, gateOnly)
             && (ignNext || sameTreeIter(node1p->m_nextp, node2p->m_nextp, false, gateOnly)));
-}
-
-//======================================================================
-// Static utilities
-
-std::ostream& operator<<(std::ostream& os, const V3Hash& rhs) {
-    return os << std::hex << std::setw(2) << std::setfill('0') << rhs.depth() << "_"
-              << std::setw(6) << std::setfill('0') << rhs.hshval();
-}
-
-V3Hash::V3Hash(const string& name) {
-    uint32_t val = 0;
-    for (const auto& c : name) val = val * 31 + c;
-    setBoth(1, val);
 }
 
 //======================================================================
@@ -1059,7 +1047,7 @@ void AstNode::dumpTreeFileGdb(const AstNode* nodep,  // LCOV_EXCL_START
         cout << "<nullptr>" << endl;
         return;
     }
-    string filename = filenamep ? filenamep : v3Global.debugFilename("debug.tree", 98);
+    const string filename = filenamep ? filenamep : v3Global.debugFilename("debug.tree", 98);
     v3Global.rootp()->dumpTreeFile(filename);
 }  // LCOV_EXCL_STOP
 
@@ -1192,7 +1180,7 @@ string AstNode::locationStr() const {
             str += modp->hierName();
             return str;
         } else if ((nvrp = VN_CAST_CONST(backp, NodeVarRef))) {
-            string prettyName = nvrp->prettyName();
+            const string prettyName = nvrp->prettyName();
             // VarRefs have not been flattened yet and do not contain location information
             if (prettyName != nvrp->name()) {
                 str += prettyName;
